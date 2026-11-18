@@ -1,0 +1,663 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes Cloud Firestore Standard Edition
+// with strict owner-isolated multi-tenancy under /shops/{shopId},
+// where shopId == request.auth.uid (supports Email/Password, Google,
+// and Anonymous demo sessions).
+//
+// Collection: shops
+// Document ID: {shopId} (must equal request.auth.uid)
+// Fields:
+//   - ownerUid: string (required, immutable, == shopId, 1..128 chars)
+//   - name: string (required, 2..80 chars)
+//   - currency: string (required, enum: USD|EUR|GBP|KES|CAD|AUD)
+//   - serviceLevelTarget: number (required, 0.85..0.99)
+//   - defaultReviewCycleDays: int (required, 1..30)
+//   - bulkMultiplierThreshold: number (required, 2..10)
+//   - browserAlertsEnabled: bool (required)
+//   - seededAt: timestamp | null (required, null or == request.time on create; unchanged or == request.time on update)
+//   - createdAt: timestamp (required, immutable, == request.time on create)
+//   - updatedAt: timestamp (required, == request.time on create/update)
+//
+// Collection: shops/{shopId}/suppliers
+// Document ID: {supplierId}
+// Fields:
+//   - name: string (required, 2..80 chars)
+//   - contactName: string (required, 0..80 chars)
+//   - email: string (required, "" or valid email, 0..120 chars)
+//   - phone: string (required, 0..40 chars)
+//   - defaultLeadTimeDays: int (required, 1..60)
+//   - orderDays: list<string> (required, max 7 items, each 1..12 chars)
+//   - notes: string (required, 0..500 chars)
+//   - createdAt: timestamp (required, immutable, == request.time on create)
+//   - updatedAt: timestamp (required, == request.time on create/update)
+//
+// Collection: shops/{shopId}/products
+// Document ID: {productId}
+// Fields:
+//   - sku: string (required, 2..40 chars)
+//   - name: string (required, 2..100 chars)
+//   - category: string (required, enum of 7 supported categories)
+//   - unit: string (required, 1..24 chars)
+//   - currentStock: number (required, 0..100000)
+//   - onOrderQty: number (required, 0..100000)
+//   - unitCost: number (required, 0..100000)
+//   - sellingPrice: number (required, 0..100000)
+//   - supplierId: string (required, 1..64 chars)
+//   - leadTimeDays: int (required, 1..60)
+//   - safetyDays: int (required, 0..30)
+//   - packSize: int (required, 1..500)
+//   - isPerishable: bool (required)
+//   - shelfLifeDays: int | null (required, 1..365 when isPerishable == true)
+//   - nearestExpiryDate: string | null (required, YYYY-MM-DD when non-null)
+//   - bulkUnitThreshold: int (required, 2..500)
+//   - isActive: bool (required)
+//   - createdAt: timestamp (required, immutable, == request.time on create)
+//   - updatedAt: timestamp (required, == request.time on create/update)
+//
+// Collection: shops/{shopId}/sales
+// Document ID: {saleId}
+// Fields:
+//   - productId: string (required, immutable, 1..64 chars)
+//   - sku: string (required, immutable, 1..40 chars)
+//   - productName: string (required, immutable, 1..100 chars)
+//   - soldDate: string (required, immutable, YYYY-MM-DD)
+//   - quantity: number (required, immutable, > 0 and <= 50000)
+//   - unitPrice: number (required, immutable, 0..100000)
+//   - orderType: string (required, mutable, enum: normal|bulk)
+//   - isPromotion: bool (required, mutable)
+//   - promoTag: string (required, mutable, 0..60 chars)
+//   - anomalyAction: string (required, mutable, enum: auto|dampen|keep)
+//   - source: string (required, immutable, enum: manual|csv_import|seed)
+//   - notes: string (required, immutable, 0..240 chars)
+//   - createdAt: timestamp (required, immutable, == request.time on create; no updatedAt field)
+//
+// Collection: shops/{shopId}/restockOrders
+// Document ID: {orderId}
+// Fields:
+//   - productId: string (required, immutable, 1..64 chars)
+//   - productName: string (required, immutable, 1..100 chars)
+//   - supplierId: string (required, immutable, 1..64 chars)
+//   - supplierName: string (required, immutable, 1..80 chars)
+//   - quantity: int (required, immutable, 1..100000)
+//   - unitCost: number (required, immutable, 0..100000)
+//   - totalCost: number (required, immutable, 0..10000000000)
+//   - status: string (required, enum: ordered|received|cancelled; ordered -> received|cancelled only)
+//   - expectedDate: string (required, immutable, YYYY-MM-DD)
+//   - receivedDate: string | null (required, YYYY-MM-DD iff status == received, else null)
+//   - notes: string (required, 0..300 chars)
+//   - createdAt: timestamp (required, immutable, == request.time on create)
+//   - updatedAt: timestamp (required, == request.time on create/update)
+//
+// Collection: shops/{shopId}/stockMovements
+// Document ID: {movementId}
+// Note: Append-only audit entries (read, create, delete for workspace reset; update denied).
+// Fields:
+//   - productId: string (required, 1..64 chars)
+//   - productName: string (required, 1..100 chars)
+//   - delta: number (required, -100000..100000)
+//   - previousStock: number (required, 0..100000)
+//   - newStock: number (required, 0..100000)
+//   - reason: string (required, enum: sale|restock_received|spoilage|cycle_count|initial_seed)
+//   - note: string (required, 0..240 chars)
+//   - createdAt: timestamp (required, == request.time on create)
+//
+// Collection: shops/{shopId}/alertStates
+// Document ID: {alertId}
+// Fields:
+//   - status: string (required, enum: read|dismissed|snoozed)
+//   - snoozedUntil: string | null (required, YYYY-MM-DD iff status == snoozed, else null)
+//   - updatedAt: timestamp (required, == request.time on create/update)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all reads and writes
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the request is from an authenticated Firebase Auth user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user owns the target shop workspace
+    function isOwner(shopId) {
+      return isAuthenticated() && request.auth.uid == shopId;
+    }
+
+    // Validate required fields exist on the resulting document
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate no extraneous fields exist on the resulting document
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate a string field's type and character bounds
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    // Validate a number (int or float) is finite and within [minVal, maxVal]
+    function isValidNumberRange(val, minVal, maxVal) {
+      return val is number && val >= minVal && val <= maxVal;
+    }
+
+    // Validate an integer is within [minVal, maxVal]
+    function isValidIntRange(val, minVal, maxVal) {
+      return val is int && val >= minVal && val <= maxVal;
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate YYYY-MM-DD ISO calendar date format
+    function isValidIsoDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.size() == 10 &&
+        dateStr.matches("^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$");
+    }
+
+    // Validate a single supplier order day label
+    function isValidOrderDay(day) {
+      return day is string && day.size() >= 1 && day.size() <= 12;
+    }
+
+    // Validate supplier orderDays list length and every element (max 7 items)
+    function isValidOrderDays(days) {
+      return days is list &&
+        days.size() <= 7 &&
+        (days.size() < 1 || isValidOrderDay(days[0])) &&
+        (days.size() < 2 || isValidOrderDay(days[1])) &&
+        (days.size() < 3 || isValidOrderDay(days[2])) &&
+        (days.size() < 4 || isValidOrderDay(days[3])) &&
+        (days.size() < 5 || isValidOrderDay(days[4])) &&
+        (days.size() < 6 || isValidOrderDay(days[5])) &&
+        (days.size() < 7 || isValidOrderDay(days[6]));
+    }
+
+    // Ensure specified fields were not modified, added, or removed during update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidShopProfile(data) {
+      return hasOnlyAllowedFields([
+          'ownerUid',
+          'name',
+          'currency',
+          'serviceLevelTarget',
+          'defaultReviewCycleDays',
+          'bulkMultiplierThreshold',
+          'browserAlertsEnabled',
+          'seededAt',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields([
+          'ownerUid',
+          'name',
+          'currency',
+          'serviceLevelTarget',
+          'defaultReviewCycleDays',
+          'bulkMultiplierThreshold',
+          'browserAlertsEnabled',
+          'seededAt',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        validStringLength('ownerUid', 1, 128) &&
+        validStringLength('name', 2, 80) &&
+        data.currency in ['USD', 'EUR', 'GBP', 'KES', 'CAD', 'AUD'] &&
+        isValidNumberRange(data.serviceLevelTarget, 0.85, 0.99) &&
+        isValidIntRange(data.defaultReviewCycleDays, 1, 30) &&
+        isValidNumberRange(data.bulkMultiplierThreshold, 2, 10) &&
+        data.browserAlertsEnabled is bool &&
+        (data.seededAt == null || data.seededAt is timestamp) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupplier(data) {
+      return hasOnlyAllowedFields([
+          'name',
+          'contactName',
+          'email',
+          'phone',
+          'defaultLeadTimeDays',
+          'orderDays',
+          'notes',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields([
+          'name',
+          'contactName',
+          'email',
+          'phone',
+          'defaultLeadTimeDays',
+          'orderDays',
+          'notes',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        validStringLength('name', 2, 80) &&
+        validStringLength('contactName', 0, 80) &&
+        validStringLength('email', 0, 120) &&
+        (data.email == '' || isValidEmail(data.email)) &&
+        validStringLength('phone', 0, 40) &&
+        isValidIntRange(data.defaultLeadTimeDays, 1, 60) &&
+        isValidOrderDays(data.orderDays) &&
+        validStringLength('notes', 0, 500) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return hasOnlyAllowedFields([
+          'sku',
+          'name',
+          'category',
+          'unit',
+          'currentStock',
+          'onOrderQty',
+          'unitCost',
+          'sellingPrice',
+          'supplierId',
+          'leadTimeDays',
+          'safetyDays',
+          'packSize',
+          'isPerishable',
+          'shelfLifeDays',
+          'nearestExpiryDate',
+          'bulkUnitThreshold',
+          'isActive',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields([
+          'sku',
+          'name',
+          'category',
+          'unit',
+          'currentStock',
+          'onOrderQty',
+          'unitCost',
+          'sellingPrice',
+          'supplierId',
+          'leadTimeDays',
+          'safetyDays',
+          'packSize',
+          'isPerishable',
+          'shelfLifeDays',
+          'nearestExpiryDate',
+          'bulkUnitThreshold',
+          'isActive',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        validStringLength('sku', 2, 40) &&
+        validStringLength('name', 2, 100) &&
+        data.category in [
+          'Dairy & Chilled',
+          'Fresh Produce',
+          'Bakery',
+          'Beverages',
+          'Pantry Staples',
+          'Snacks',
+          'Household & Care'
+        ] &&
+        validStringLength('unit', 1, 24) &&
+        isValidNumberRange(data.currentStock, 0, 100000) &&
+        isValidNumberRange(data.onOrderQty, 0, 100000) &&
+        isValidNumberRange(data.unitCost, 0, 100000) &&
+        isValidNumberRange(data.sellingPrice, 0, 100000) &&
+        validStringLength('supplierId', 1, 64) &&
+        isValidIntRange(data.leadTimeDays, 1, 60) &&
+        isValidIntRange(data.safetyDays, 0, 30) &&
+        isValidIntRange(data.packSize, 1, 500) &&
+        data.isPerishable is bool &&
+        (data.shelfLifeDays == null || isValidIntRange(data.shelfLifeDays, 1, 365)) &&
+        (!data.isPerishable || data.shelfLifeDays != null) &&
+        (data.nearestExpiryDate == null || isValidIsoDateString(data.nearestExpiryDate)) &&
+        isValidIntRange(data.bulkUnitThreshold, 2, 500) &&
+        data.isActive is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSale(data) {
+      return hasOnlyAllowedFields([
+          'productId',
+          'sku',
+          'productName',
+          'soldDate',
+          'quantity',
+          'unitPrice',
+          'orderType',
+          'isPromotion',
+          'promoTag',
+          'anomalyAction',
+          'source',
+          'notes',
+          'createdAt'
+        ]) &&
+        hasRequiredFields([
+          'productId',
+          'sku',
+          'productName',
+          'soldDate',
+          'quantity',
+          'unitPrice',
+          'orderType',
+          'isPromotion',
+          'promoTag',
+          'anomalyAction',
+          'source',
+          'notes',
+          'createdAt'
+        ]) &&
+        validStringLength('productId', 1, 64) &&
+        validStringLength('sku', 1, 40) &&
+        validStringLength('productName', 1, 100) &&
+        isValidIsoDateString(data.soldDate) &&
+        data.quantity is number &&
+        data.quantity > 0 &&
+        data.quantity <= 50000 &&
+        isValidNumberRange(data.unitPrice, 0, 100000) &&
+        data.orderType in ['normal', 'bulk'] &&
+        data.isPromotion is bool &&
+        validStringLength('promoTag', 0, 60) &&
+        data.anomalyAction in ['auto', 'dampen', 'keep'] &&
+        data.source in ['manual', 'csv_import', 'seed'] &&
+        validStringLength('notes', 0, 240) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidRestockOrder(data) {
+      return hasOnlyAllowedFields([
+          'productId',
+          'productName',
+          'supplierId',
+          'supplierName',
+          'quantity',
+          'unitCost',
+          'totalCost',
+          'status',
+          'expectedDate',
+          'receivedDate',
+          'notes',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields([
+          'productId',
+          'productName',
+          'supplierId',
+          'supplierName',
+          'quantity',
+          'unitCost',
+          'totalCost',
+          'status',
+          'expectedDate',
+          'receivedDate',
+          'notes',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        validStringLength('productId', 1, 64) &&
+        validStringLength('productName', 1, 100) &&
+        validStringLength('supplierId', 1, 64) &&
+        validStringLength('supplierName', 1, 80) &&
+        isValidIntRange(data.quantity, 1, 100000) &&
+        isValidNumberRange(data.unitCost, 0, 100000) &&
+        isValidNumberRange(data.totalCost, 0, 10000000000) &&
+        data.status in ['ordered', 'received', 'cancelled'] &&
+        isValidIsoDateString(data.expectedDate) &&
+        (
+          (data.status == 'received' && isValidIsoDateString(data.receivedDate)) ||
+          (data.status != 'received' && data.receivedDate == null)
+        ) &&
+        validStringLength('notes', 0, 300) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRestockOrderTransition() {
+      let prev = resource.data.status;
+      let next = request.resource.data.status;
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return areImmutableFieldsUnchanged([
+          'productId',
+          'productName',
+          'supplierId',
+          'supplierName',
+          'quantity',
+          'unitCost',
+          'totalCost',
+          'expectedDate',
+          'createdAt'
+        ]) &&
+        (
+          (prev == 'ordered' &&
+            next == 'received' &&
+            changed.hasOnly(['status', 'receivedDate', 'updatedAt']) &&
+            isValidIsoDateString(request.resource.data.receivedDate)) ||
+          (prev == 'ordered' &&
+            next == 'cancelled' &&
+            changed.hasOnly(['status', 'updatedAt']) &&
+            request.resource.data.receivedDate == null) ||
+          (prev == next &&
+            changed.hasOnly(['notes', 'updatedAt']))
+        );
+    }
+
+    function isValidStockMovement(data) {
+      return hasOnlyAllowedFields([
+          'productId',
+          'productName',
+          'delta',
+          'previousStock',
+          'newStock',
+          'reason',
+          'note',
+          'createdAt'
+        ]) &&
+        hasRequiredFields([
+          'productId',
+          'productName',
+          'delta',
+          'previousStock',
+          'newStock',
+          'reason',
+          'note',
+          'createdAt'
+        ]) &&
+        validStringLength('productId', 1, 64) &&
+        validStringLength('productName', 1, 100) &&
+        isValidNumberRange(data.delta, -100000, 100000) &&
+        isValidNumberRange(data.previousStock, 0, 100000) &&
+        isValidNumberRange(data.newStock, 0, 100000) &&
+        data.reason in [
+          'sale',
+          'restock_received',
+          'spoilage',
+          'cycle_count',
+          'initial_seed'
+        ] &&
+        validStringLength('note', 0, 240) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAlertState(data) {
+      return hasOnlyAllowedFields([
+          'status',
+          'snoozedUntil',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields([
+          'status',
+          'snoozedUntil',
+          'updatedAt'
+        ]) &&
+        data.status in ['read', 'dismissed', 'snoozed'] &&
+        (
+          (data.status == 'snoozed' && isValidIsoDateString(data.snoozedUntil)) ||
+          (data.status != 'snoozed' && data.snoozedUntil == null)
+        ) &&
+        data.updatedAt is timestamp;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /shops/{shopId} {
+      allow read: if isOwner(shopId);
+
+      allow create: if isOwner(shopId) &&
+        isValidShopProfile(request.resource.data) &&
+        request.resource.data.ownerUid == shopId &&
+        (request.resource.data.seededAt == null || request.resource.data.seededAt == request.time) &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time;
+
+      allow update: if isOwner(shopId) &&
+        isValidShopProfile(request.resource.data) &&
+        areImmutableFieldsUnchanged(['ownerUid', 'createdAt']) &&
+        (request.resource.data.seededAt == resource.data.seededAt ||
+          request.resource.data.seededAt == request.time) &&
+        request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+
+      match /suppliers/{supplierId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidSupplier(request.resource.data) &&
+          request.resource.data.createdAt == request.time &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(shopId) &&
+          isValidSupplier(request.resource.data) &&
+          areImmutableFieldsUnchanged(['createdAt']) &&
+          request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(shopId);
+      }
+
+      match /products/{productId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidProduct(request.resource.data) &&
+          request.resource.data.createdAt == request.time &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(shopId) &&
+          isValidProduct(request.resource.data) &&
+          areImmutableFieldsUnchanged(['createdAt']) &&
+          request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(shopId);
+      }
+
+      match /sales/{saleId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidSale(request.resource.data) &&
+          request.resource.data.createdAt == request.time;
+
+        allow update: if isOwner(shopId) &&
+          isValidSale(request.resource.data) &&
+          areImmutableFieldsUnchanged([
+            'productId',
+            'sku',
+            'productName',
+            'soldDate',
+            'quantity',
+            'unitPrice',
+            'source',
+            'notes',
+            'createdAt'
+          ]) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'orderType',
+            'isPromotion',
+            'promoTag',
+            'anomalyAction'
+          ]);
+
+        allow delete: if isOwner(shopId);
+      }
+
+      match /restockOrders/{orderId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidRestockOrder(request.resource.data) &&
+          request.resource.data.status in ['ordered', 'received'] &&
+          request.resource.data.createdAt == request.time &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(shopId) &&
+          isValidRestockOrder(request.resource.data) &&
+          isValidRestockOrderTransition() &&
+          request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(shopId);
+      }
+
+      match /stockMovements/{movementId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidStockMovement(request.resource.data) &&
+          request.resource.data.createdAt == request.time;
+
+        allow update: if false;
+
+        allow delete: if isOwner(shopId);
+      }
+
+      match /alertStates/{alertId} {
+        allow read: if isOwner(shopId);
+
+        allow create: if isOwner(shopId) &&
+          isValidAlertState(request.resource.data) &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(shopId) &&
+          isValidAlertState(request.resource.data) &&
+          request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(shopId);
+      }
+    }
+  }
+}

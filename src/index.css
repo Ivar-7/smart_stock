@@ -1,0 +1,97 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+  --ss-canvas: #f7f7f8;
+  --ss-sidebar: #f2f2f4;
+  --ss-panel: #ffffff;
+  --ss-panel-subtle: #f4f4f6;
+  --ss-panel-hover: #ebebee;
+  --ss-panel-active: #e4e4e8;
+  --ss-edge: #e4e4e7;
+  --ss-edge-strong: #d4d4d8;
+  --ss-ink: #111113;
+  --ss-ink-secondary: #52525b;
+  --ss-ink-muted: #71717a;
+  --ss-series-primary: #18181b;
+  --ss-series-secondary: #71717a;
+  --ss-series-tertiary: #d4d4d8;
+  --ss-gauge-track: #e8e8ec;
+  --ss-gauge-mint: #5eb98b;
+  --ss-gauge-sand: #d4a459;
+  --ss-gauge-lavender: #8c82d8;
+  --ss-accent-contrast-bg: #18181b;
+  --ss-accent-contrast-ink: #fafafa;
+}
+
+.dark {
+  color-scheme: dark;
+  --ss-canvas: #0b0b0c;
+  --ss-sidebar: #0e0e10;
+  --ss-panel: #131316;
+  --ss-panel-subtle: #19191d;
+  --ss-panel-hover: #212126;
+  --ss-panel-active: #27272d;
+  --ss-edge: #232328;
+  --ss-edge-strong: #323239;
+  --ss-ink: #f4f4f5;
+  --ss-ink-secondary: #a1a1aa;
+  --ss-ink-muted: #71717a;
+  --ss-series-primary: #fafafa;
+  --ss-series-secondary: #71717a;
+  --ss-series-tertiary: #2e2e34;
+  --ss-gauge-track: #1d1d22;
+  --ss-gauge-mint: #b2e2c6;
+  --ss-gauge-sand: #ebd4ac;
+  --ss-gauge-lavender: #cdc5f5;
+  --ss-accent-contrast-bg: #f4f4f5;
+  --ss-accent-contrast-ink: #0b0b0c;
+}
+
+@theme inline {
+  --color-canvas: var(--ss-canvas);
+  --color-sidebar: var(--ss-sidebar);
+  --color-panel: var(--ss-panel);
+  --color-panel-subtle: var(--ss-panel-subtle);
+  --color-panel-hover: var(--ss-panel-hover);
+  --color-panel-active: var(--ss-panel-active);
+  --color-edge: var(--ss-edge);
+  --color-edge-strong: var(--ss-edge-strong);
+  --color-ink: var(--ss-ink);
+  --color-ink-secondary: var(--ss-ink-secondary);
+  --color-ink-muted: var(--ss-ink-muted);
+  --color-series-primary: var(--ss-series-primary);
+  --color-series-secondary: var(--ss-series-secondary);
+  --color-series-tertiary: var(--ss-series-tertiary);
+  --color-gauge-track: var(--ss-gauge-track);
+  --color-contrast-bg: var(--ss-accent-contrast-bg);
+  --color-contrast-ink: var(--ss-accent-contrast-ink);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    width: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--ss-canvas);
+    color: var(--ss-ink);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  button,
+  a,
+  select,
+  input,
+  textarea {
+    outline-color: var(--ss-edge-strong);
+  }
+}
